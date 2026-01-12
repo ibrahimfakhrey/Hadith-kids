@@ -10,6 +10,17 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Change working directory to project root (important for relative paths)
+os.chdir(project_root)
+
+# Ensure data directory exists
+data_dir = os.path.join(project_root, 'data')
+os.makedirs(data_dir, exist_ok=True)
+
+# Set DATABASE_URL to absolute path if not already set
+if 'DATABASE_URL' not in os.environ:
+    os.environ['DATABASE_URL'] = f"sqlite:///{os.path.join(data_dir, 'hadith.db')}"
+
 # Now we can import from app
 from app.main import app as fastapi_app
 from app.database import init_db
@@ -17,12 +28,8 @@ from app.database import init_db
 # Initialize database on startup
 init_db()
 
-# Use asgiref to convert ASGI to WSGI
-# You need to install: pip install asgiref
-from asgiref.wsgi import WsgiToAsgi
-
-# Actually we need the reverse - ASGI to WSGI
-# Use a2wsgi instead: pip install a2wsgi
+# Use a2wsgi to convert ASGI to WSGI
+# You need to install: pip install a2wsgi
 try:
     from a2wsgi import ASGIMiddleware
     app = ASGIMiddleware(fastapi_app)

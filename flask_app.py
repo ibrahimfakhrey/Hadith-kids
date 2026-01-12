@@ -17,11 +17,15 @@ os.chdir(project_root)
 data_dir = os.path.join(project_root, 'data')
 os.makedirs(data_dir, exist_ok=True)
 
-# Set DATABASE_URL to absolute path if not already set
-if 'DATABASE_URL' not in os.environ:
-    os.environ['DATABASE_URL'] = f"sqlite:///{os.path.join(data_dir, 'hadith.db')}"
+# Set DATABASE_URL to absolute path BEFORE any imports
+db_path = os.path.join(data_dir, 'hadith.db')
+os.environ['DATABASE_URL'] = f"sqlite:///{db_path}"
 
-# Now we can import from app
+# Clear the settings cache to pick up new env var
+from app.config import get_settings
+get_settings.cache_clear()
+
+# Now import the app (this will use the new DATABASE_URL)
 from app.main import app as fastapi_app
 from app.database import init_db
 
@@ -29,13 +33,11 @@ from app.database import init_db
 init_db()
 
 # Use a2wsgi to convert ASGI to WSGI
-# You need to install: pip install a2wsgi
 try:
     from a2wsgi import ASGIMiddleware
     app = ASGIMiddleware(fastapi_app)
     application = app  # PythonAnywhere expects 'application'
 except ImportError:
-    # Fallback error message
     def application(environ, start_response):
         start_response('500 Internal Server Error', [('Content-Type', 'text/plain')])
         return [b'Please install a2wsgi: pip install a2wsgi']

@@ -1,87 +1,83 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from flask import Blueprint, jsonify, request
 from sqlalchemy import func
-from typing import List, Optional
 
 from app.database import get_db
 from app.models import Topic, Chapter, Hadith, Book, Grade
-from app.schemas.topic import TopicResponse, TopicDetailResponse
-from app.schemas.hadith import HadithResponse, GradeResponse
 
-router = APIRouter(prefix="/topics", tags=["Topics"])
+bp = Blueprint('topics', __name__)
 
 
-def get_sahih_hadiths_for_topic(db: Session, topic_id: int, limit: Optional[int] = None):
-    """Helper function to get Sahih hadiths for a topic."""
-    # Get hadith IDs that have Sahih grade
-    sahih_hadith_ids = db.query(Grade.hadith_id).filter(
-        func.lower(Grade.grade).contains("sahih")
-    ).distinct().subquery()
-
-    # Query hadiths in this topic with Sahih grade
-    query = db.query(Hadith).join(Chapter).filter(
-        Chapter.topic_id == topic_id,
-        Hadith.id.in_(db.query(sahih_hadith_ids))
-    ).order_by(Hadith.book_id, Hadith.hadith_number)
-
-    if limit:
-        query = query.limit(limit)
-
-    return query.all()
+def grade_to_dict(grade):
+    """Convert Grade model to dictionary."""
+    return {
+        "grader_name": grade.grader_name,
+        "grade": grade.grade
+    }
 
 
-@router.get("", response_model=List[TopicResponse])
-def list_topics(db: Session = Depends(get_db)):
+def hadith_to_dict(h):
+    """Convert Hadith model to dictionary."""
+    return {
+        "id": h.id,
+        "hadith_number": h.hadith_number,
+        "arabic_number": h.arabic_number,
+        "text_ar": h.text_ar,
+        "text_en": h.text_en,
+        "narrator_en": h.narrator_en,
+        "reference": h.reference,
+        "book_slug": h.book.slug if h.book else None,
+        "book_name_en": h.book.name_en if h.book else None,
+        "book_name_ar": h.book.name_ar if h.book else None,
+        "chapter_number": h.chapter.number if h.chapter else None,
+        "chapter_title_en": h.chapter.title_en if h.chapter else None,
+        "grades": [grade_to_dict(g) for g in h.grades]
+    }
+
+
+@bp.route("", methods=["GET"])
+def list_topics():
     """
     List all Islamic topic categories.
-
-    Returns topics like: Prayer, Fasting, Hajj, Ethics, etc.
-    Each topic includes count of chapters and hadiths.
     """
+    db = get_db()
     topics = db.query(Topic).order_by(Topic.order).all()
 
     result = []
     for topic in topics:
-        # Count chapters in this topic
         chapter_count = db.query(Chapter).filter(Chapter.topic_id == topic.id).count()
-
-        # Count hadiths in chapters of this topic
         hadith_count = db.query(Hadith).join(Chapter).filter(
             Chapter.topic_id == topic.id
         ).count()
 
-        result.append(TopicResponse(
-            id=topic.id,
-            name_en=topic.name_en,
-            name_ar=topic.name_ar,
-            slug=topic.slug,
-            description_en=topic.description_en,
-            description_ar=topic.description_ar,
-            order=topic.order,
-            chapter_count=chapter_count,
-            hadith_count=hadith_count
-        ))
+        result.append({
+            "id": topic.id,
+            "name_en": topic.name_en,
+            "name_ar": topic.name_ar,
+            "slug": topic.slug,
+            "description_en": topic.description_en,
+            "description_ar": topic.description_ar,
+            "order": topic.order,
+            "chapter_count": chapter_count,
+            "hadith_count": hadith_count
+        })
 
-    return result
+    return jsonify(result)
 
 
-@router.get("/{slug}", response_model=TopicDetailResponse)
-def get_topic(slug: str, db: Session = Depends(get_db)):
+@bp.route("/<slug>", methods=["GET"])
+def get_topic(slug):
     """
     Get topic details with its chapters.
-
-    - **slug**: Topic slug (e.g., 'salah', 'sawm', 'hajj')
     """
+    db = get_db()
     topic = db.query(Topic).filter(Topic.slug == slug).first()
     if not topic:
-        raise HTTPException(status_code=404, detail=f"Topic '{slug}' not found")
+        return jsonify({"detail": f"Topic '{slug}' not found"}), 404
 
-    # Get chapters in this topic
     chapters = db.query(Chapter).filter(
         Chapter.topic_id == topic.id
     ).order_by(Chapter.book_id, Chapter.number).all()
 
-    # Build chapter list with book info
     chapter_list = []
     for ch in chapters:
         book = db.query(Book).filter(Book.id == ch.book_id).first()
@@ -97,131 +93,98 @@ def get_topic(slug: str, db: Session = Depends(get_db)):
             "hadith_count": hadith_count
         })
 
-    # Count totals
     chapter_count = len(chapters)
     hadith_count = db.query(Hadith).join(Chapter).filter(
         Chapter.topic_id == topic.id
     ).count()
 
-    return TopicDetailResponse(
-        id=topic.id,
-        name_en=topic.name_en,
-        name_ar=topic.name_ar,
-        slug=topic.slug,
-        description_en=topic.description_en,
-        description_ar=topic.description_ar,
-        order=topic.order,
-        chapter_count=chapter_count,
-        hadith_count=hadith_count,
-        chapters=chapter_list
-    )
+    return jsonify({
+        "id": topic.id,
+        "name_en": topic.name_en,
+        "name_ar": topic.name_ar,
+        "slug": topic.slug,
+        "description_en": topic.description_en,
+        "description_ar": topic.description_ar,
+        "order": topic.order,
+        "chapter_count": chapter_count,
+        "hadith_count": hadith_count,
+        "chapters": chapter_list
+    })
 
 
-@router.get("/{slug}/hadiths", response_model=dict)
-def get_topic_hadiths(
-    slug: str,
-    book: Optional[str] = Query(None, description="Filter by book slug"),
-    grade: Optional[str] = Query(None, description="Filter by grade"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<slug>/hadiths", methods=["GET"])
+def get_topic_hadiths(slug):
     """
     Get all hadiths in a topic.
-
-    - **slug**: Topic slug (e.g., 'salah', 'sawm')
-    - **book**: Optional filter by book slug
-    - **grade**: Optional filter by grade
-    - **page**: Page number
-    - **page_size**: Results per page
     """
+    db = get_db()
+
+    book = request.args.get('book')
+    grade = request.args.get('grade')
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 20, type=int)
+
+    page = max(1, page)
+    page_size = min(100, max(1, page_size))
+
     topic = db.query(Topic).filter(Topic.slug == slug).first()
     if not topic:
-        raise HTTPException(status_code=404, detail=f"Topic '{slug}' not found")
+        return jsonify({"detail": f"Topic '{slug}' not found"}), 404
 
-    # Build query
     query = db.query(Hadith).join(Chapter).filter(Chapter.topic_id == topic.id)
 
-    # Apply filters
     if book:
         book_obj = db.query(Book).filter(Book.slug == book).first()
         if book_obj:
             query = query.filter(Hadith.book_id == book_obj.id)
 
     if grade:
-        from app.models import Grade
         grade_lower = grade.lower()
         hadith_ids = db.query(Grade.hadith_id).filter(
             func.lower(Grade.grade).contains(grade_lower)
         ).distinct().subquery()
         query = query.filter(Hadith.id.in_(db.query(hadith_ids)))
 
-    # Get total
     total = query.count()
 
-    # Paginate
     offset = (page - 1) * page_size
     hadiths = query.order_by(Hadith.book_id, Hadith.hadith_number).offset(offset).limit(page_size).all()
 
-    # Build response
-    hadith_list = []
-    for h in hadiths:
-        hadith_list.append(HadithResponse(
-            id=h.id,
-            hadith_number=h.hadith_number,
-            arabic_number=h.arabic_number,
-            text_ar=h.text_ar,
-            text_en=h.text_en,
-            narrator_en=h.narrator_en,
-            reference=h.reference,
-            book_slug=h.book.slug if h.book else None,
-            book_name_en=h.book.name_en if h.book else None,
-            book_name_ar=h.book.name_ar if h.book else None,
-            chapter_number=h.chapter.number if h.chapter else None,
-            chapter_title_en=h.chapter.title_en if h.chapter else None,
-            grades=[GradeResponse(grader_name=g.grader_name, grade=g.grade) for g in h.grades]
-        ))
-
-    return {
+    return jsonify({
         "topic": {
             "slug": topic.slug,
             "name_en": topic.name_en,
             "name_ar": topic.name_ar
         },
-        "hadiths": hadith_list,
+        "hadiths": [hadith_to_dict(h) for h in hadiths],
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size
-    }
+    })
 
 
-@router.get("/{slug}/sahih", response_model=dict)
-def get_topic_sahih_hadiths(
-    slug: str,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<slug>/sahih", methods=["GET"])
+def get_topic_sahih_hadiths(slug):
     """
     Get only SAHIH (authentic) hadiths for a topic.
-
-    - **slug**: Topic slug (e.g., 'salah', 'sawm', 'hajj')
-    - **page**: Page number
-    - **page_size**: Results per page (max 100)
-
-    Returns only hadiths that have been graded as Sahih by scholars.
     """
+    db = get_db()
+
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 20, type=int)
+
+    page = max(1, page)
+    page_size = min(100, max(1, page_size))
+
     topic = db.query(Topic).filter(Topic.slug == slug).first()
     if not topic:
-        raise HTTPException(status_code=404, detail=f"Topic '{slug}' not found")
+        return jsonify({"detail": f"Topic '{slug}' not found"}), 404
 
-    # Get Sahih hadith IDs
     sahih_hadith_ids = db.query(Grade.hadith_id).filter(
         func.lower(Grade.grade).contains("sahih")
     ).distinct().subquery()
 
-    # Query Sahih hadiths in this topic
     query = db.query(Hadith).join(Chapter).filter(
         Chapter.topic_id == topic.id,
         Hadith.id.in_(db.query(sahih_hadith_ids))
@@ -229,16 +192,12 @@ def get_topic_sahih_hadiths(
 
     total = query.count()
 
-    # Paginate
     offset = (page - 1) * page_size
     hadiths = query.order_by(Hadith.book_id, Hadith.hadith_number).offset(offset).limit(page_size).all()
 
-    # Build response
     hadith_list = []
     for h in hadiths:
-        # Only include Sahih grades
         sahih_grades = [g for g in h.grades if "sahih" in g.grade.lower()]
-
         hadith_list.append({
             "id": h.id,
             "hadith_number": h.hadith_number,
@@ -253,7 +212,7 @@ def get_topic_sahih_hadiths(
             "grades": [{"grader": g.grader_name, "grade": g.grade} for g in sahih_grades]
         })
 
-    return {
+    return jsonify({
         "topic": {
             "slug": topic.slug,
             "name_en": topic.name_en,
@@ -266,39 +225,31 @@ def get_topic_sahih_hadiths(
         "page": page,
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size
-    }
+    })
 
 
-@router.get("-with-sahih", response_model=List[dict])
-def get_all_topics_with_sahih_hadiths(
-    limit_per_topic: int = Query(10, ge=1, le=50, description="Max hadiths per topic"),
-    db: Session = Depends(get_db)
-):
+@bp.route("-with-sahih", methods=["GET"])
+def get_all_topics_with_sahih_hadiths():
     """
     Get ALL topics with their SAHIH hadiths.
-
-    Returns all 25 Islamic topics, each with a sample of Sahih hadiths.
-
-    - **limit_per_topic**: Maximum hadiths to return per topic (default 10, max 50)
-
-    Perfect for building a complete Islamic reference with authentic hadiths only.
     """
+    db = get_db()
+    limit_per_topic = request.args.get('limit_per_topic', 10, type=int)
+    limit_per_topic = min(50, max(1, limit_per_topic))
+
     topics = db.query(Topic).order_by(Topic.order).all()
 
-    # Get all Sahih hadith IDs once
     sahih_hadith_ids = db.query(Grade.hadith_id).filter(
         func.lower(Grade.grade).contains("sahih")
     ).distinct().subquery()
 
     result = []
     for topic in topics:
-        # Get Sahih hadiths for this topic
         hadiths = db.query(Hadith).join(Chapter).filter(
             Chapter.topic_id == topic.id,
             Hadith.id.in_(db.query(sahih_hadith_ids))
         ).order_by(Hadith.book_id, Hadith.hadith_number).limit(limit_per_topic).all()
 
-        # Count total Sahih in topic
         total_sahih = db.query(Hadith).join(Chapter).filter(
             Chapter.topic_id == topic.id,
             Hadith.id.in_(db.query(sahih_hadith_ids))
@@ -331,4 +282,4 @@ def get_all_topics_with_sahih_hadiths(
             "hadiths": hadith_list
         })
 
-    return result
+    return jsonify(result)

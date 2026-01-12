@@ -1,13 +1,13 @@
-from app.routers.books import router as books_router
-from app.routers.chapters import router as chapters_router
-from app.routers.hadiths import router as hadiths_router
-from app.routers.search import router as search_router
-from app.routers.topics import router as topics_router
-from app.routers.auth import router as auth_router
-from app.routers.children import router as children_router
-from app.routers.progress import router as progress_router
+from app.routers.books import bp as books_bp
+from app.routers.chapters import bp as chapters_bp
+from app.routers.hadiths import bp as hadiths_bp
+from app.routers.search import bp as search_bp
+from app.routers.topics import bp as topics_bp
+from app.routers.auth import bp as auth_bp
+from app.routers.children import bp as children_bp
+from app.routers.progress import bp as progress_bp
 
 __all__ = [
-    "books_router", "chapters_router", "hadiths_router",
-    "search_router", "topics_router", "auth_router", "children_router", "progress_router"
+    "books_bp", "chapters_bp", "hadiths_bp",
+    "search_bp", "topics_bp", "auth_bp", "children_bp", "progress_bp"
 ]

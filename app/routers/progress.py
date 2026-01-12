@@ -2,20 +2,43 @@
 Progress router for tracking children's hadith learning progress.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from typing import List, Optional
+from flask import Blueprint, request, jsonify
+from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime
 
 from app.database import get_db
-from app.schemas.auth import ProgressCreate, ProgressUpdate, ProgressResponse, ProgressWithHadith
-from app.services.auth_service import get_current_user
-from app.models import User, Child, ChildHadithProgress, Hadith, LearningStatus
+from app.services.auth_service import login_required, get_current_user
+from app.models import Child, ChildHadithProgress, Hadith, LearningStatus
 
-router = APIRouter(prefix="/children/{child_id}/progress", tags=["Learning Progress"])
+bp = Blueprint('progress', __name__)
 
 
-def get_child_for_user(child_id: int, current_user: User, db: Session) -> Child:
+class ProgressCreate(BaseModel):
+    hadith_id: int
+
+
+class ProgressUpdate(BaseModel):
+    status: str
+    notes: Optional[str] = None
+
+
+def progress_to_dict(progress):
+    """Convert ChildHadithProgress model to dictionary."""
+    return {
+        "id": progress.id,
+        "child_id": progress.child_id,
+        "hadith_id": progress.hadith_id,
+        "status": progress.status,
+        "started_at": progress.started_at.isoformat() if progress.started_at else None,
+        "last_reviewed_at": progress.last_reviewed_at.isoformat() if progress.last_reviewed_at else None,
+        "memorized_at": progress.memorized_at.isoformat() if progress.memorized_at else None,
+        "review_count": progress.review_count,
+        "notes": progress.notes
+    }
+
+
+def get_child_for_user(child_id, current_user, db):
     """Helper to verify child belongs to current user."""
     child = db.query(Child).filter(
         Child.id == child_id,
@@ -23,47 +46,46 @@ def get_child_for_user(child_id: int, current_user: User, db: Session) -> Child:
     ).first()
 
     if not child:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Child not found"
-        )
+        return None
     return child
 
 
-@router.get("", response_model=List[ProgressResponse])
-async def list_progress(
-    child_id: int,
-    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>/progress", methods=["GET"])
+@login_required
+def list_progress(child_id):
     """
     List all hadith progress for a child.
-
-    Optionally filter by status: new, reading, memorizing, memorized, reviewing
     """
+    db = get_db()
+    current_user = get_current_user()
+
     child = get_child_for_user(child_id, current_user, db)
+    if not child:
+        return jsonify({"detail": "Child not found"}), 404
+
+    status_filter = request.args.get('status')
 
     query = db.query(ChildHadithProgress).filter(ChildHadithProgress.child_id == child.id)
 
     if status_filter:
         query = query.filter(ChildHadithProgress.status == status_filter)
 
-    return query.all()
+    progress_list = query.all()
+    return jsonify([progress_to_dict(p) for p in progress_list])
 
 
-@router.get("/stats")
-async def get_progress_stats(
-    child_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>/progress/stats", methods=["GET"])
+@login_required
+def get_progress_stats(child_id):
     """
     Get progress statistics for a child.
-
-    Returns counts for each learning status.
     """
+    db = get_db()
+    current_user = get_current_user()
+
     child = get_child_for_user(child_id, current_user, db)
+    if not child:
+        return jsonify({"detail": "Child not found"}), 404
 
     stats = {}
     for status in LearningStatus:
@@ -76,46 +98,43 @@ async def get_progress_stats(
     total = sum(stats.values())
     stats["total"] = total
 
-    return {
+    return jsonify({
         "child_id": child.id,
         "child_name": child.name,
         "stats": stats
-    }
+    })
 
 
-@router.post("", response_model=ProgressResponse, status_code=status.HTTP_201_CREATED)
-async def start_learning(
-    child_id: int,
-    progress_data: ProgressCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>/progress", methods=["POST"])
+@login_required
+def start_learning(child_id):
     """
     Start tracking a hadith for a child.
-
-    This creates a new progress record with status 'new'.
     """
-    child = get_child_for_user(child_id, current_user, db)
+    db = get_db()
+    current_user = get_current_user()
+    data = request.get_json()
 
-    # Check if hadith exists
+    child = get_child_for_user(child_id, current_user, db)
+    if not child:
+        return jsonify({"detail": "Child not found"}), 404
+
+    try:
+        progress_data = ProgressCreate(**data)
+    except Exception as e:
+        return jsonify({"detail": str(e)}), 400
+
     hadith = db.query(Hadith).filter(Hadith.id == progress_data.hadith_id).first()
     if not hadith:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Hadith not found"
-        )
+        return jsonify({"detail": "Hadith not found"}), 404
 
-    # Check if progress already exists
     existing = db.query(ChildHadithProgress).filter(
         ChildHadithProgress.child_id == child.id,
         ChildHadithProgress.hadith_id == progress_data.hadith_id
     ).first()
 
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Progress already exists for this hadith"
-        )
+        return jsonify({"detail": "Progress already exists for this hadith"}), 400
 
     progress = ChildHadithProgress(
         child_id=child.id,
@@ -125,20 +144,22 @@ async def start_learning(
     db.add(progress)
     db.commit()
     db.refresh(progress)
-    return progress
+
+    return jsonify(progress_to_dict(progress)), 201
 
 
-@router.get("/{hadith_id}", response_model=ProgressWithHadith)
-async def get_progress(
-    child_id: int,
-    hadith_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>/progress/<int:hadith_id>", methods=["GET"])
+@login_required
+def get_progress(child_id, hadith_id):
     """
     Get progress for a specific hadith.
     """
+    db = get_db()
+    current_user = get_current_user()
+
     child = get_child_for_user(child_id, current_user, db)
+    if not child:
+        return jsonify({"detail": "Child not found"}), 404
 
     progress = db.query(ChildHadithProgress).filter(
         ChildHadithProgress.child_id == child.id,
@@ -146,41 +167,36 @@ async def get_progress(
     ).first()
 
     if not progress:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Progress not found for this hadith"
-        )
+        return jsonify({"detail": "Progress not found for this hadith"}), 404
 
-    # Get hadith details
     hadith = db.query(Hadith).filter(Hadith.id == hadith_id).first()
 
-    result = ProgressResponse.model_validate(progress)
-    return ProgressWithHadith(
-        **result.model_dump(),
-        hadith={
+    result = progress_to_dict(progress)
+    if hadith:
+        result["hadith"] = {
             "id": hadith.id,
             "text_ar": hadith.text_ar[:200] + "..." if len(hadith.text_ar or "") > 200 else hadith.text_ar,
             "text_en": hadith.text_en[:200] + "..." if len(hadith.text_en or "") > 200 else hadith.text_en,
             "book_id": hadith.book_id,
             "hadith_number": hadith.hadith_number
-        } if hadith else None
-    )
+        }
+
+    return jsonify(result)
 
 
-@router.put("/{hadith_id}", response_model=ProgressResponse)
-async def update_progress(
-    child_id: int,
-    hadith_id: int,
-    progress_data: ProgressUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>/progress/<int:hadith_id>", methods=["PUT"])
+@login_required
+def update_progress(child_id, hadith_id):
     """
     Update progress status for a hadith.
-
-    Status flow: new -> reading -> memorizing -> memorized -> reviewing
     """
+    db = get_db()
+    current_user = get_current_user()
+    data = request.get_json()
+
     child = get_child_for_user(child_id, current_user, db)
+    if not child:
+        return jsonify({"detail": "Child not found"}), 404
 
     progress = db.query(ChildHadithProgress).filter(
         ChildHadithProgress.child_id == child.id,
@@ -188,16 +204,16 @@ async def update_progress(
     ).first()
 
     if not progress:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Progress not found for this hadith"
-        )
+        return jsonify({"detail": "Progress not found for this hadith"}), 404
 
-    # Update status
+    try:
+        progress_data = ProgressUpdate(**data)
+    except Exception as e:
+        return jsonify({"detail": str(e)}), 400
+
     old_status = progress.status
     progress.status = progress_data.status
 
-    # Track timestamps based on status changes
     if progress_data.status == LearningStatus.MEMORIZED.value and old_status != LearningStatus.MEMORIZED.value:
         progress.memorized_at = datetime.utcnow()
 
@@ -205,26 +221,27 @@ async def update_progress(
         progress.last_reviewed_at = datetime.utcnow()
         progress.review_count += 1
 
-    # Update notes if provided
     if progress_data.notes is not None:
         progress.notes = progress_data.notes
 
     db.commit()
     db.refresh(progress)
-    return progress
+
+    return jsonify(progress_to_dict(progress))
 
 
-@router.delete("/{hadith_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_progress(
-    child_id: int,
-    hadith_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>/progress/<int:hadith_id>", methods=["DELETE"])
+@login_required
+def delete_progress(child_id, hadith_id):
     """
     Remove progress tracking for a hadith.
     """
+    db = get_db()
+    current_user = get_current_user()
+
     child = get_child_for_user(child_id, current_user, db)
+    if not child:
+        return jsonify({"detail": "Child not found"}), 404
 
     progress = db.query(ChildHadithProgress).filter(
         ChildHadithProgress.child_id == child.id,
@@ -232,11 +249,9 @@ async def delete_progress(
     ).first()
 
     if not progress:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Progress not found for this hadith"
-        )
+        return jsonify({"detail": "Progress not found for this hadith"}), 404
 
     db.delete(progress)
     db.commit()
-    return None
+
+    return '', 204

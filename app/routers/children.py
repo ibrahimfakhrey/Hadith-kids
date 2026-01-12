@@ -2,43 +2,62 @@
 Children router for managing user's children.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
+from flask import Blueprint, request, jsonify
+from pydantic import BaseModel
+from typing import Optional
 
 from app.database import get_db
-from app.schemas.auth import ChildCreate, ChildUpdate, ChildResponse
-from app.services.auth_service import get_current_user
-from app.models import User, Child
+from app.services.auth_service import login_required, get_current_user
+from app.models import Child
 
-router = APIRouter(prefix="/children", tags=["Children"])
+bp = Blueprint('children', __name__)
 
 
-@router.get("", response_model=List[ChildResponse])
-async def list_children(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+class ChildCreate(BaseModel):
+    name: str
+    avatar: Optional[str] = None
+
+
+class ChildUpdate(BaseModel):
+    name: Optional[str] = None
+    avatar: Optional[str] = None
+
+
+def child_to_dict(child):
+    """Convert Child model to dictionary."""
+    return {
+        "id": child.id,
+        "name": child.name,
+        "avatar": child.avatar,
+        "created_at": child.created_at.isoformat() if child.created_at else None
+    }
+
+
+@bp.route("", methods=["GET"])
+@login_required
+def list_children():
     """
     List all children for the current user.
-
-    Requires authentication.
     """
-    return current_user.children
+    current_user = get_current_user()
+    return jsonify([child_to_dict(c) for c in current_user.children])
 
 
-@router.post("", response_model=ChildResponse, status_code=status.HTTP_201_CREATED)
-async def create_child(
-    child_data: ChildCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("", methods=["POST"])
+@login_required
+def create_child():
     """
     Add a new child for the current user.
-
-    - **name**: Child's name (required)
-    - **avatar**: Optional avatar identifier
     """
+    db = get_db()
+    current_user = get_current_user()
+    data = request.get_json()
+
+    try:
+        child_data = ChildCreate(**data)
+    except Exception as e:
+        return jsonify({"detail": str(e)}), 400
+
     child = Child(
         user_id=current_user.id,
         name=child_data.name,
@@ -47,58 +66,53 @@ async def create_child(
     db.add(child)
     db.commit()
     db.refresh(child)
-    return child
+
+    return jsonify(child_to_dict(child)), 201
 
 
-@router.get("/{child_id}", response_model=ChildResponse)
-async def get_child(
-    child_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>", methods=["GET"])
+@login_required
+def get_child(child_id):
     """
     Get a specific child by ID.
-
-    Only returns children belonging to the current user.
     """
+    db = get_db()
+    current_user = get_current_user()
+
     child = db.query(Child).filter(
         Child.id == child_id,
         Child.user_id == current_user.id
     ).first()
 
     if not child:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Child not found"
-        )
+        return jsonify({"detail": "Child not found"}), 404
 
-    return child
+    return jsonify(child_to_dict(child))
 
 
-@router.put("/{child_id}", response_model=ChildResponse)
-async def update_child(
-    child_id: int,
-    child_data: ChildUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>", methods=["PUT"])
+@login_required
+def update_child(child_id):
     """
     Update a child's information.
-
-    Only updates children belonging to the current user.
     """
+    db = get_db()
+    current_user = get_current_user()
+    data = request.get_json()
+
     child = db.query(Child).filter(
         Child.id == child_id,
         Child.user_id == current_user.id
     ).first()
 
     if not child:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Child not found"
-        )
+        return jsonify({"detail": "Child not found"}), 404
 
-    # Update only provided fields
+    try:
+        child_data = ChildUpdate(**data)
+    except Exception as e:
+        return jsonify({"detail": str(e)}), 400
+
     if child_data.name is not None:
         child.name = child_data.name
     if child_data.avatar is not None:
@@ -106,32 +120,28 @@ async def update_child(
 
     db.commit()
     db.refresh(child)
-    return child
+
+    return jsonify(child_to_dict(child))
 
 
-@router.delete("/{child_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_child(
-    child_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@bp.route("/<int:child_id>", methods=["DELETE"])
+@login_required
+def delete_child(child_id):
     """
     Delete a child.
-
-    This will also delete all hadith progress for this child.
-    Only deletes children belonging to the current user.
     """
+    db = get_db()
+    current_user = get_current_user()
+
     child = db.query(Child).filter(
         Child.id == child_id,
         Child.user_id == current_user.id
     ).first()
 
     if not child:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Child not found"
-        )
+        return jsonify({"detail": "Child not found"}), 404
 
     db.delete(child)
     db.commit()
-    return None
+
+    return '', 204

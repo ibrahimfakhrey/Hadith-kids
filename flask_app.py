@@ -1,6 +1,18 @@
 """
-WSGI adapter for PythonAnywhere.
-This wraps the FastAPI app for WSGI compatibility.
+Flask app entry point for PythonAnywhere deployment.
+
+PythonAnywhere WSGI Configuration:
+In your PythonAnywhere web app settings, set:
+- Source code: /home/yourusername/hadeth
+- Working directory: /home/yourusername/hadeth
+- WSGI configuration file: Edit to contain:
+
+    import sys
+    path = '/home/yourusername/hadeth'
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+    from flask_app import app as application
 """
 import sys
 import os
@@ -25,19 +37,11 @@ os.environ['DATABASE_URL'] = f"sqlite:///{db_path}"
 from app.config import get_settings
 get_settings.cache_clear()
 
-# Now import the app (this will use the new DATABASE_URL)
-from app.main import app as fastapi_app
-from app.database import init_db
+# Import the Flask app
+from app.main import app
 
-# Initialize database on startup
-init_db()
+# PythonAnywhere expects 'application'
+application = app
 
-# Use a2wsgi to convert ASGI to WSGI
-try:
-    from a2wsgi import ASGIMiddleware
-    app = ASGIMiddleware(fastapi_app)
-    application = app  # PythonAnywhere expects 'application'
-except ImportError:
-    def application(environ, start_response):
-        start_response('500 Internal Server Error', [('Content-Type', 'text/plain')])
-        return [b'Please install a2wsgi: pip install a2wsgi']
+if __name__ == "__main__":
+    app.run(debug=True)

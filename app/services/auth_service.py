@@ -4,11 +4,10 @@ Authentication service for JWT token management and password hashing.
 
 from datetime import datetime, timedelta
 from typing import Optional
+from functools import wraps
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from flask import request, jsonify, g
 
 from app.config import get_settings
 from app.database import get_db
@@ -18,9 +17,6 @@ settings = get_settings()
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# OAuth2 scheme for token extraction
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_prefix}/auth/login")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -64,17 +60,17 @@ def decode_token(token: str) -> Optional[dict]:
         return None
 
 
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
+def get_user_by_email(db, email: str) -> Optional[User]:
     """Get a user by email."""
     return db.query(User).filter(User.email == email).first()
 
 
-def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
+def get_user_by_id(db, user_id: int) -> Optional[User]:
     """Get a user by ID."""
     return db.query(User).filter(User.id == user_id).first()
 
 
-def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
+def authenticate_user(db, email: str, password: str) -> Optional[User]:
     """Authenticate a user by email and password."""
     user = get_user_by_email(db, email)
     if not user:
@@ -84,7 +80,7 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     return user
 
 
-def create_user(db: Session, email: str, password: str, name: str) -> User:
+def create_user(db, email: str, password: str, name: str) -> User:
     """Create a new user."""
     hashed_password = get_password_hash(password)
     user = User(
@@ -98,45 +94,51 @@ def create_user(db: Session, email: str, password: str, name: str) -> User:
     return user
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> User:
-    """
-    Dependency to get the current authenticated user from JWT token.
+def get_token_from_header() -> Optional[str]:
+    """Extract Bearer token from Authorization header."""
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        return auth_header[7:]
+    return None
 
-    Use this in any endpoint that requires authentication:
-        @router.get("/protected")
-        def protected_route(current_user: User = Depends(get_current_user)):
-            return {"user": current_user.email}
-    """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
 
-    payload = decode_token(token)
-    if payload is None:
-        raise credentials_exception
+def login_required(f):
+    """Decorator to require authentication for Flask routes."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        token = get_token_from_header()
 
-    user_id_str = payload.get("sub")
-    if user_id_str is None:
-        raise credentials_exception
+        if not token:
+            return jsonify({"detail": "Not authenticated"}), 401
 
-    try:
-        user_id = int(user_id_str)
-    except (ValueError, TypeError):
-        raise credentials_exception
+        payload = decode_token(token)
+        if payload is None:
+            return jsonify({"detail": "Could not validate credentials"}), 401
 
-    user = get_user_by_id(db, user_id)
-    if user is None:
-        raise credentials_exception
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
+            return jsonify({"detail": "Could not validate credentials"}), 401
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is disabled"
-        )
+        try:
+            user_id = int(user_id_str)
+        except (ValueError, TypeError):
+            return jsonify({"detail": "Could not validate credentials"}), 401
 
-    return user
+        db = get_db()
+        user = get_user_by_id(db, user_id)
+        if user is None:
+            return jsonify({"detail": "Could not validate credentials"}), 401
+
+        if not user.is_active:
+            return jsonify({"detail": "User account is disabled"}), 403
+
+        # Store user in Flask's g object for access in the route
+        g.current_user = user
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def get_current_user() -> User:
+    """Get the current authenticated user from g object."""
+    return g.current_user

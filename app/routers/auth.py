@@ -2,48 +2,76 @@
 Authentication router for user registration, login, and profile.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
+from flask import Blueprint, request, jsonify
 from datetime import timedelta
+from pydantic import BaseModel, EmailStr, field_validator
 
 from app.database import get_db
 from app.config import get_settings
-from app.schemas.auth import (
-    UserRegister,
-    Token,
-    UserResponse,
-    UserWithChildren,
-)
 from app.services.auth_service import (
     get_user_by_email,
     create_user,
     authenticate_user,
     create_access_token,
+    login_required,
     get_current_user,
 )
-from app.models import User
 
 settings = get_settings()
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+bp = Blueprint('auth', __name__)
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(user_data: UserRegister, db: Session = Depends(get_db)):
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+
+    @field_validator('password')
+    @classmethod
+    def password_min_length(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        return v
+
+
+def user_to_dict(user):
+    """Convert User model to dictionary."""
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "is_active": user.is_active,
+        "created_at": user.created_at.isoformat() if user.created_at else None
+    }
+
+
+def child_to_dict(child):
+    """Convert Child model to dictionary."""
+    return {
+        "id": child.id,
+        "name": child.name,
+        "avatar": child.avatar,
+        "created_at": child.created_at.isoformat() if child.created_at else None
+    }
+
+
+@bp.route("/register", methods=["POST"])
+def register():
     """
     Register a new user account.
-
-    - **email**: Valid email address (must be unique)
-    - **password**: Password (min 6 characters)
-    - **name**: User's display name
     """
+    db = get_db()
+    data = request.get_json()
+
+    try:
+        user_data = UserRegister(**data)
+    except Exception as e:
+        return jsonify({"detail": str(e)}), 400
+
     # Check if email already exists
     existing_user = get_user_by_email(db, user_data.email)
     if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
+        return jsonify({"detail": "Email already registered"}), 400
 
     # Create new user
     user = create_user(
@@ -53,32 +81,34 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
         name=user_data.name
     )
 
-    return user
+    return jsonify(user_to_dict(user)), 201
 
 
-@router.post("/login", response_model=Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+@bp.route("/login", methods=["POST"])
+def login():
     """
     Login to get an access token.
-
-    Use the token in the Authorization header: `Bearer <token>`
-
-    - **username**: Your email address
-    - **password**: Your password
     """
-    user = authenticate_user(db, form_data.username, form_data.password)
+    db = get_db()
+
+    # Support both form data and JSON
+    if request.is_json:
+        data = request.get_json()
+        username = data.get("username") or data.get("email")
+        password = data.get("password")
+    else:
+        username = request.form.get("username")
+        password = request.form.get("password")
+
+    if not username or not password:
+        return jsonify({"detail": "Username and password are required"}), 400
+
+    user = authenticate_user(db, username, password)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        return jsonify({"detail": "Incorrect email or password"}), 401
 
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is disabled"
-        )
+        return jsonify({"detail": "User account is disabled"}), 403
 
     # Create access token
     access_token_expires = timedelta(minutes=settings.jwt_access_token_expire_minutes)
@@ -87,24 +117,26 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         expires_delta=access_token_expires
     )
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return jsonify({"access_token": access_token, "token_type": "bearer"})
 
 
-@router.get("/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
+@bp.route("/me", methods=["GET"])
+@login_required
+def get_me():
     """
     Get the current authenticated user's profile.
-
-    Requires authentication via Bearer token.
     """
-    return current_user
+    current_user = get_current_user()
+    return jsonify(user_to_dict(current_user))
 
 
-@router.get("/me/with-children", response_model=UserWithChildren)
-async def get_me_with_children(current_user: User = Depends(get_current_user)):
+@bp.route("/me/with-children", methods=["GET"])
+@login_required
+def get_me_with_children():
     """
     Get the current user's profile with their children.
-
-    Requires authentication via Bearer token.
     """
-    return current_user
+    current_user = get_current_user()
+    result = user_to_dict(current_user)
+    result["children"] = [child_to_dict(c) for c in current_user.children]
+    return jsonify(result)

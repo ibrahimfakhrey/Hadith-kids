@@ -10,106 +10,89 @@ This API provides access to the six major hadith collections (Kutub al-Sittah):
 - Sunan Ibn Majah
 """
 
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, jsonify
+from flask_cors import CORS
 
 from app.config import get_settings
-from app.database import init_db
-from app.routers import books_router, chapters_router, hadiths_router, search_router, topics_router, auth_router, children_router, progress_router
+from app.database import init_db, db_session
+from app.routers import (
+    books_bp, chapters_bp, hadiths_bp, search_bp,
+    topics_bp, auth_bp, children_bp, progress_bp
+)
 from app.services.search_service import get_search_service
 
 settings = get_settings()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan handler."""
-    # Startup
-    print("Starting Hadith API...")
+def create_app():
+    """Application factory."""
+    app = Flask(__name__)
 
-    # Initialize database
-    init_db()
-    print("Database initialized.")
+    # Configure CORS
+    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-    # Connect to Meilisearch
-    search_service = get_search_service()
-    if search_service.connect():
-        print("Connected to Meilisearch.")
-    else:
-        print("Warning: Could not connect to Meilisearch. Search features will be limited.")
+    # Initialize database on first request
+    with app.app_context():
+        print("Starting Hadith API...")
+        init_db()
+        print("Database initialized.")
 
-    yield
+        # Connect to Meilisearch
+        search_service = get_search_service()
+        if search_service.connect():
+            print("Connected to Meilisearch.")
+        else:
+            print("Warning: Could not connect to Meilisearch. Search features will be limited.")
 
-    # Shutdown
-    print("Shutting down Hadith API...")
+    # Register blueprints with API prefix
+    app.register_blueprint(books_bp, url_prefix=f"{settings.api_prefix}/books")
+    app.register_blueprint(chapters_bp, url_prefix=f"{settings.api_prefix}/chapters")
+    app.register_blueprint(hadiths_bp, url_prefix=f"{settings.api_prefix}/hadiths")
+    app.register_blueprint(search_bp, url_prefix=f"{settings.api_prefix}/search")
+    app.register_blueprint(topics_bp, url_prefix=f"{settings.api_prefix}/topics")
+    app.register_blueprint(auth_bp, url_prefix=f"{settings.api_prefix}/auth")
+    app.register_blueprint(children_bp, url_prefix=f"{settings.api_prefix}/children")
+    app.register_blueprint(progress_bp, url_prefix=f"{settings.api_prefix}/children")
 
+    # Root endpoint
+    @app.route("/")
+    def root():
+        """Root endpoint with API information."""
+        return jsonify({
+            "name": settings.app_name,
+            "version": settings.app_version,
+            "description": "Bilingual Hadith API (Arabic/English)",
+            "endpoints": {
+                "books": f"{settings.api_prefix}/books",
+                "topics": f"{settings.api_prefix}/topics",
+                "hadiths": f"{settings.api_prefix}/hadiths",
+                "search": f"{settings.api_prefix}/search",
+                "random": f"{settings.api_prefix}/hadiths/random"
+            }
+        })
 
-# Create FastAPI app
-app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    description=__doc__,
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json"
-)
+    # Health check endpoint
+    @app.route("/health")
+    def health():
+        """Health check endpoint."""
+        search_service = get_search_service()
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "search": "connected" if search_service.is_connected() else "disconnected"
+        })
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure as needed for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # Cleanup database session after each request
+    @app.teardown_appcontext
+    def shutdown_session(exception=None):
+        db_session.remove()
 
-# Include routers
-app.include_router(books_router, prefix=settings.api_prefix)
-app.include_router(chapters_router, prefix=settings.api_prefix)
-app.include_router(hadiths_router, prefix=settings.api_prefix)
-app.include_router(search_router, prefix=settings.api_prefix)
-app.include_router(topics_router, prefix=settings.api_prefix)
-app.include_router(auth_router, prefix=settings.api_prefix)
-app.include_router(children_router, prefix=settings.api_prefix)
-app.include_router(progress_router, prefix=settings.api_prefix)
-
-
-@app.get("/")
-def root():
-    """Root endpoint with API information."""
-    return {
-        "name": settings.app_name,
-        "version": settings.app_version,
-        "description": "Bilingual Hadith API (Arabic/English)",
-        "docs": "/docs",
-        "endpoints": {
-            "books": f"{settings.api_prefix}/books",
-            "topics": f"{settings.api_prefix}/topics",
-            "hadiths": f"{settings.api_prefix}/hadiths",
-            "search": f"{settings.api_prefix}/search",
-            "random": f"{settings.api_prefix}/hadiths/random"
-        }
-    }
+    return app
 
 
-@app.get("/health")
-def health():
-    """Health check endpoint."""
-    search_service = get_search_service()
-    return {
-        "status": "healthy",
-        "database": "connected",
-        "search": "connected" if search_service.is_connected() else "disconnected"
-    }
+# Create the app instance
+app = create_app()
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=settings.debug
-    )
+    app.run(host="0.0.0.0", port=8000, debug=settings.debug)
